@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>血壓記錄助手 - Standalone</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .tab-active { color: #2563eb; }
+  .tab-inactive { color: #9ca3af; }
+  input[type="number"]::-webkit-inner-spin-button { opacity: 1; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="app"></div>
+<script>
+(function() {
+  // ===== Storage =====
+  const RECORDS_KEY = 'bp_records';
+  const PROFILE_KEY = 'bp_profile';
+
+  function saveRecords(records) {
+    try { localStorage.setItem(RECORDS_KEY, JSON.stringify(records)); } catch(e) {}
+  }
+  function loadRecords() {
+    try { const d = localStorage.getItem(RECORDS_KEY); return d ? JSON.parse(d) : []; } catch(e) { return []; }
+  }
+  function saveProfile(profile) {
+    try { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); } catch(e) {}
+  }
+  function loadProfile() {
+    try { const d = localStorage.getItem(PROFILE_KEY); return d ? JSON.parse(d) : { name:'', age:0, gender:'' }; } catch(e) { return { name:'', age:0, gender:'' }; }
+  }
+
+  // ===== BP Utils =====
+  function classifyBP(sys, dia) {
+    if (sys < 90 || dia < 60) return { label:'偏低', bg:'bg-blue-100', text:'text-blue-700', advice:'⚠️ 血壓偏低，可能會感到頭暈、疲倦。建議多喝水，避免突然站起，如持續不適請就醫。' };
+    if (sys < 120 && dia < 80) return { label:'正常', bg:'bg-green-100', text:'text-green-700', advice:'✅ 血壓正常！繼續保持健康的生活習慣，定期監測。' };
+    if (sys < 130 && dia < 80) return { label:'偏高', bg:'bg-yellow-100', text:'text-yellow-700', advice:'⚠️ 血壓略為偏高，建議注意飲食（少鹽少油），適量運動，保持心情愉快。' };
+    if (sys < 140 || dia < 90) return { label:'高血壓一期', bg:'bg-orange-100', text:'text-orange-700', advice:'🟠 高血壓第一期。建議改善生活習慣，減少鈉攝入，定期量血壓，並考慮諮詢醫生。' };
+    if (sys < 180 || dia < 120) return { label:'高血壓二期', bg:'bg-red-100', text:'text-red-600', advice:'🔴 高血壓第二期！請儘快就醫，遵從醫生指示服藥，注意休息，避免情緒激動。' };
+    return { label:'危險高血壓', bg:'bg-red-200', text:'text-red-800', advice:'🚨 血壓極度危險！請立即就醫或撥打急救電話！' };
+  }
+
+  function classifyHR(hr) {
+    if (hr < 60) return { label:'偏慢', color:'text-blue-600', advice:'心率偏慢，如無不適可觀察。' };
+    if (hr <= 100) return { label:'正常', color:'text-green-600', advice:'心率正常。' };
+    return { label:'偏快', color:'text-red-600', advice:'心率偏快，請保持放鬆。' };
+  }
+
+  function getTimePeriod(time) {
+    const h = parseInt(time.split(':')[0], 10);
+    if (h >= 5 && h < 12) return '早上';
+    if (h >= 12 && h < 17) return '下午';
+    if (h >= 17 && h < 21) return '傍晚';
+    return '晚上';
+  }
+
+  // ===== State =====
+  let profile = loadProfile();
+  let records = loadRecords();
+  let currentTab = 'input';
+  let periodFilter = '全部';
+  let chartMetric = 'bp';
+  let chartInstance = null;
+
+  const app = document.getElementById('app');
+
+  function render() {
+    if (!profile.name || !profile.age || !profile.gender) {
+      renderProfile();
+    } else {
+      renderMain();
+    }
+  }
+
+  // ===== Profile Page =====
+  function renderProfile() {
+    app.innerHTML = `
+      <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+        <div class="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+          <div class="text-center mb-8">
+            <div class="text-6xl mb-4">❤️</div>
+            <h1 class="text-3xl font-bold text-gray-800">血壓記錄助手</h1>
+            <p class="text-gray-500 mt-2 text-lg">請先設定您的個人資料</p>
+          </div>
+          <div class="space-y-6">
+            <div>
+              <label class="block text-xl font-semibold text-gray-700 mb-2">👤 姓名</label>
+              <input id="pName" type="text" value="${profile.name||''}" placeholder="請輸入姓名" class="w-full px-5 py-4 text-xl border-2 border-gray-200 rounded-2xl focus:border-blue-500 outline-none">
+            </div>
+            <div>
+              <label class="block text-xl font-semibold text-gray-700 mb-2">🎂 年齡</label>
+              <input id="pAge" type="number" value="${profile.age||''}" placeholder="請輸入年齡" min="1" max="150" class="w-full px-5 py-4 text-xl border-2 border-gray-200 rounded-2xl focus:border-blue-500 outline-none">
+            </div>
+            <div>
+              <label class="block text-xl font-semibold text-gray-700 mb-3">⚧ 性別</label>
+              <div class="flex gap-4">
+                <button onclick="selectGender('男')" id="gMale" class="flex-1 py-4 text-xl rounded-2xl border-2 font-semibold ${profile.gender==='男'?'border-blue-500 bg-blue-50 text-blue-700':'border-gray-200 text-gray-500'}">👨 男</button>
+                <button onclick="selectGender('女')" id="gFemale" class="flex-1 py-4 text-xl rounded-2xl border-2 font-semibold ${profile.gender==='女'?'border-pink-500 bg-pink-50 text-pink-700':'border-gray-200 text-gray-500'}">👩 女</button>
+              </div>
+            </div>
+            <button onclick="saveProfileForm()" class="w-full py-4 text-xl font-bold text-white bg-gradient-to-r from-blue-500 to-indigo-600 rounded-2xl hover:from-blue-600 hover:to-indigo-700 transition-all shadow-lg active:scale-95">開始使用 →</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  let tempGender = profile.gender || '';
+  window.selectGender = function(g) {
+    tempGender = g;
+    document.getElementById('gMale').className = g==='男' ? 'flex-1 py-4 text-xl rounded-2xl border-2 font-semibold border-blue-500 bg-blue-50 text-blue-700' : 'flex-1 py-4 text-xl rounded-2xl border-2 font-semibold border-gray-200 text-gray-500';
+    document.getElementById('gFemale').className = g==='女' ? 'flex-1 py-4 text-xl rounded-2xl border-2 font-semibold border-pink-500 bg-pink-50 text-pink-700' : 'flex-1 py-4 text-xl rounded-2xl border-2 font-semibold border-gray-200 text-gray-500';
+  };
+  window.saveProfileForm = function() {
+    const name = document.getElementById('pName').value.trim();
+    const age = parseInt(document.getElementById('pAge').value);
+    if (!name || !age || !tempGender) { alert('請填寫所有資料'); return; }
+    profile = { name, age, gender: tempGender };
+    saveProfile(profile);
+    render();
+  };
+
+  // ===== Main App =====
+  function renderMain() {
+    const tabContent = currentTab === 'input' ? renderInputTab()
+      : currentTab === 'records' ? renderRecordsTab()
+      : currentTab === 'chart' ? renderChartTab()
+      : renderGuideTab();
+
+    app.innerHTML = `
+      <div class="min-h-screen bg-gray-50 pb-24">
+        <div class="pt-2">${tabContent}</div>
+        <div class="fixed bottom-0 left-0 right-0 bg-white border-t-2 border-gray-100 shadow-lg">
+          <div class="max-w-2xl mx-auto flex">
+            ${['input','records','chart','guide'].map(t => {
+              const icons = { input:'🩺', records:'📋', chart:'📊', guide:'📖' };
+              const labels = { input:'記錄', records:'歷史', chart:'趨勢', guide:'指引' };
+              const active = currentTab === t;
+              return `<button onclick="switchTab('${t}')" class="flex-1 py-3 flex flex-col items-center gap-0.5 ${active?'text-blue-600':'text-gray-400'}">
+                <span class="text-2xl">${icons[t]}</span>
+                <span class="text-xs font-semibold">${labels[t]}</span>
+                ${active?'<div class="w-6 h-1 bg-blue-600 rounded-full mt-0.5"></div>':''}
+              </button>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>`;
+
+    if (currentTab === 'chart') initChart();
+  }
+
+  window.switchTab = function(t) { currentTab = t; periodFilter = '全部'; renderMain(); };
+
+  // ===== Input Tab =====
+  function renderInputTab() {
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0,10);
+    const timeStr = now.toTimeString().slice(0,5);
+    return `<div class="max-w-lg mx-auto p-4">
+      <div class="bg-gradient-to-r from-blue-500 to-indigo-600 rounded-2xl p-5 mb-6 text-white shadow-lg">
+        <div class="flex justify-between items-center">
+          <div>
+            <div class="text-2xl font-bold">${profile.gender==='男'?'👨':'👩'} ${profile.name}</div>
+            <div class="text-blue-100 text-lg mt-1">${profile.age} 歲 · ${profile.gender}</div>
+          </div>
+          <button onclick="editProfile()" class="text-sm bg-white/20 px-3 py-1.5 rounded-xl hover:bg-white/30">修改資料</button>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-md p-5 mb-4">
+        <h3 class="text-xl font-bold text-gray-700 mb-4">📅 日期與時間</h3>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-base font-medium text-gray-600 mb-1">日期</label>
+            <input id="inDate" type="date" value="${dateStr}" class="w-full px-4 py-3 text-lg border-2 border-gray-200 rounded-xl focus:border-blue-500 outline-none">
+          </div>
+          <div>
+            <label class="block text-base font-medium text-gray-600 mb-1">時間</label>
+            <input id="inTime" type="time" value="${timeStr}" class="w-full px-4 py-3 text-lg border-2 border-gray-200 rounded-xl focus:border-blue-500 outline-none">
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-md p-5 mb-4">
+        <h3 class="text-xl font-bold text-gray-700 mb-4">🩺 血壓與心跳</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-base font-medium text-gray-600 mb-1">上壓（收縮壓）mmHg</label>
+            <input id="inSys" type="number" placeholder="例如：120" min="50" max="300" class="w-full px-4 py-3 text-2xl font-bold border-2 border-gray-200 rounded-xl focus:border-red-400 outline-none text-center">
+          </div>
+          <div>
+            <label class="block text-base font-medium text-gray-600 mb-1">下壓（舒張壓）mmHg</label>
+            <input id="inDia" type="number" placeholder="例如：80" min="30" max="200" class="w-full px-4 py-3 text-2xl font-bold border-2 border-gray-200 rounded-xl focus:border-blue-400 outline-none text-center">
+          </div>
+          <div>
+            <label class="block text-base font-medium text-gray-600 mb-1">心跳 (次/分鐘)</label>
+            <input id="inHR" type="number" placeholder="例如：72" min="30" max="250" class="w-full px-4 py-3 text-2xl font-bold border-2 border-gray-200 rounded-xl focus:border-purple-400 outline-none text-center">
+          </div>
+        </div>
+      </div>
+      <button onclick="saveRecord()" class="w-full py-4 text-xl font-bold text-white bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl hover:from-green-600 hover:to-emerald-700 transition-all shadow-lg active:scale-95 mb-4">💾 儲存記錄</button>
+      <div id="resultArea"></div>
+    </div>`;
+  }
+
+  window.editProfile = function() {
+    tempGender = profile.gender;
+    profile = { name:'', age:0, gender:'' };
+    render();
+  };
+
+  window.saveRecord = function() {
+    const date = document.getElementById('inDate').value;
+    const time = document.getElementById('inTime').value;
+    const sys = parseInt(document.getElementById('inSys').value);
+    const dia = parseInt(document.getElementById('inDia').value);
+    const hr = parseInt(document.getElementById('inHR').value);
+    if (!date || !time || !sys || !dia || !hr) { alert('請填寫所有欄位'); return; }
+    const bp = classifyBP(sys, dia);
+    const hrC = classifyHR(hr);
+    const record = { id: Date.now().toString()+Math.random().toString(36).slice(2,6), date, time, systolic:sys, diastolic:dia, heartRate:hr, period:getTimePeriod(time), classification:bp.label, classColor:bp.text };
+    records.push(record);
+    saveRecords(records);
+    const area = document.getElementById('resultArea');
+    area.innerHTML = `
+      <div class="${bp.bg} rounded-2xl p-5 mb-4">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-lg font-semibold text-gray-600">血壓評估</span>
+          <span class="text-2xl font-bold ${bp.text}">${bp.label}</span>
+        </div>
+        <div class="flex justify-center gap-8 mb-3">
+          <div class="text-center"><div class="text-3xl font-bold text-red-600">${sys}</div><div class="text-sm text-gray-500">上壓</div></div>
+          <div class="text-3xl text-gray-300">/</div>
+          <div class="text-center"><div class="text-3xl font-bold text-blue-600">${dia}</div><div class="text-sm text-gray-500">下壓</div></div>
+        </div>
+        <p class="text-base text-gray-700">${bp.advice}</p>
+      </div>
+      <div class="bg-purple-50 rounded-2xl p-5 mb-4 border-2 border-purple-100">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-lg font-semibold text-gray-600">心跳評估</span>
+          <span class="text-2xl font-bold ${hrC.color}">${hrC.label}</span>
+        </div>
+        <div class="text-center mb-2"><span class="text-3xl font-bold text-purple-600">${hr}</span><span class="text-lg text-gray-500 ml-1">次/分鐘</span></div>
+        <p class="text-base text-gray-700">${hrC.advice}</p>
+      </div>
+      <p class="text-center text-green-600 font-semibold text-lg mb-2">✅ 記錄已儲存！</p>`;
+    document.getElementById('inSys').value = '';
+    document.getElementById('inDia').value = '';
+    document.getElementById('inHR').value = '';
+  };
+
+  // ===== Records Tab =====
+  function renderRecordsTab() {
+    const periods = ['全部','早上','下午','傍晚','晚上'];
+    const filtered = periodFilter === '全部' ? records : records.filter(r => r.period === periodFilter);
+    const sorted = [...filtered].sort((a,b) => (`${b.date} ${b.time}`).localeCompare(`${a.date} ${a.time}`));
+
+    let rows = '';
+    if (sorted.length === 0) {
+      rows = '<div class="text-center py-16 text-gray-400"><div class="text-5xl mb-4">📝</div><p class="text-xl">暫無記錄</p></div>';
+    } else {
+      rows = sorted.map(r => {
+        const bp = classifyBP(r.systolic, r.diastolic);
+        const badgeClass = { '偏低':'bg-blue-100 text-blue-700','正常':'bg-green-100 text-green-700','偏高':'bg-yellow-100 text-yellow-700','高血壓一期':'bg-orange-100 text-orange-700','高血壓二期':'bg-red-100 text-red-600','危險高血壓':'bg-red-200 text-red-800' }[r.classification] || 'bg-gray-100 text-gray-600';
+        return `<div class="bg-white rounded-2xl shadow-md p-4 border border-gray-100">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-base text-gray-500">📅 ${r.date} · 🕐 ${r.time} · ${r.period}</div>
+            <span class="px-3 py-1 rounded-full text-sm font-bold ${badgeClass}">${r.classification}</span>
+          </div>
+          <div class="flex items-center justify-around">
+            <div class="text-center"><div class="text-2xl font-bold text-red-500">${r.systolic}</div><div class="text-xs text-gray-400">上壓</div></div>
+            <div class="text-xl text-gray-300">/</div>
+            <div class="text-center"><div class="text-2xl font-bold text-blue-500">${r.diastolic}</div><div class="text-xs text-gray-400">下壓</div></div>
+            <div class="text-xl text-gray-300">|</div>
+            <div class="text-center"><div class="text-2xl font-bold text-purple-500">${r.heartRate}</div><div class="text-xs text-gray-400">心跳</div></div>
+          </div>
+          <div class="mt-3 p-3 rounded-xl text-sm ${badgeClass}">${bp.advice}</div>
+          <div class="mt-2 flex justify-end"><button onclick="deleteRecord('${r.id}')" class="text-sm text-red-400 hover:text-red-600">🗑️ 刪除</button></div>
+        </div>`;
+      }).join('');
+    }
+
+    return `<div class="max-w-2xl mx-auto p-4">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-2xl font-bold text-gray-800">📋 記錄列表</h2>
+        <span class="text-base text-gray-500">${filtered.length} 筆</span>
+      </div>
+      <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
+        ${periods.map(p => `<button onclick="setRecordFilter('${p}')" class="px-4 py-2 rounded-xl text-base font-medium whitespace-nowrap ${periodFilter===p?'bg-blue-600 text-white shadow-md':'bg-gray-100 text-gray-600 hover:bg-gray-200'}">${p}</button>`).join('')}
+      </div>
+      <div class="flex gap-3 mb-3">
+        <button onclick="exportXLS()" ${sorted.length===0?'disabled':''} class="flex-1 py-3 text-base font-semibold bg-emerald-50 text-emerald-700 rounded-xl hover:bg-emerald-100 disabled:opacity-40 border-2 border-emerald-200">📤 匯出 Excel</button>
+        <label class="flex-1 py-3 text-base font-semibold bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 border-2 border-indigo-200 text-center cursor-pointer">📥 匯入 Excel<input type="file" accept=".xlsx,.xls,.csv" onchange="importXLS(event)" class="hidden"></label>
+      </div>
+      <div class="mb-5">
+        <button onclick="clearAllData()" ${records.length===0?'disabled':''} class="w-full py-3 text-base font-semibold bg-red-50 text-red-600 rounded-xl hover:bg-red-100 disabled:opacity-40 border-2 border-red-200">🗑️ 清除所有資料</button>
+      </div>
+      <div class="space-y-3">${rows}</div>
+    </div>`;
+  }
+
+  window.setRecordFilter = function(p) { periodFilter = p; renderMain(); };
+  window.deleteRecord = function(id) {
+    if (!confirm('確定要刪除這筆記錄嗎？')) return;
+    records = records.filter(r => r.id !== id);
+    saveRecords(records);
+    renderMain();
+  };
+  window.clearAllData = function() {
+    if (!confirm('⚠️ 確定要清除所有資料嗎？\n\n此操作將刪除所有血壓記錄及個人資料，且無法復原！\n\n共 ' + records.length + ' 筆記錄將被刪除。')) return;
+    if (!confirm('🚨 最後確認！\n\n你確定要永久刪除所有資料嗎？\n此操作無法撤銷，建議先匯出備份。')) return;
+    records = [];
+    profile = { name:'', age:0, gender:'' };
+    localStorage.removeItem(RECORDS_KEY);
+    localStorage.removeItem(PROFILE_KEY);
+    profileSet = false;
+    renderMain();
+  };
+  window.exportXLS = function() {
+    const data = records.map(r => ({ '日期':r.date, '時間':r.time, '時段':r.period, '上壓 (mmHg)':r.systolic, '下壓 (mmHg)':r.diastolic, '心跳 (次/分鐘)':r.heartRate, '評估':r.classification }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '血壓記錄');
+    XLSX.writeFile(wb, '血壓記錄_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  };
+  window.importXLS = function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, {type:'array'});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws);
+        const imported = json.map(row => {
+          const sys = Number(row['上壓 (mmHg)']||row['systolic']||0);
+          const dia = Number(row['下壓 (mmHg)']||row['diastolic']||0);
+          const hr = Number(row['心跳 (次/分鐘)']||row['heartRate']||0);
+          const bp = classifyBP(sys, dia);
+          return { id:Date.now().toString()+Math.random().toString(36).slice(2,6), date:String(row['日期']||row['date']||''), time:String(row['時間']||row['time']||'00:00'), systolic:sys, diastolic:dia, heartRate:hr, period:String(row['時段']||row['period']||'早上'), classification:bp.label, classColor:bp.text };
+        }).filter(r => r.systolic > 0 && r.diastolic > 0);
+        if (imported.length > 0) { records = records.concat(imported); saveRecords(records); alert('成功匯入 '+imported.length+' 筆記錄！'); renderMain(); }
+        else alert('未能讀取有效記錄。');
+      } catch(err) { alert('匯入失敗'); }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
+  };
+
+  // ===== Chart Tab =====
+  function renderChartTab() {
+    const periods = ['全部','早上','下午','傍晚','晚上'];
+    const filtered = periodFilter === '全部' ? records : records.filter(r => r.period === periodFilter);
+    const sorted = [...filtered].sort((a,b) => (`${a.date} ${a.time}`).localeCompare(`${b.date} ${b.time}`));
+
+    const avgSys = filtered.length ? Math.round(filtered.reduce((s,r) => s+r.systolic, 0)/filtered.length) : 0;
+    const avgDia = filtered.length ? Math.round(filtered.reduce((s,r) => s+r.diastolic, 0)/filtered.length) : 0;
+    const avgHR = filtered.length ? Math.round(filtered.reduce((s,r) => s+r.heartRate, 0)/filtered.length) : 0;
+
+    return `<div class="max-w-2xl mx-auto p-4">
+      <h2 class="text-2xl font-bold text-gray-800 mb-4">📊 趨勢圖表</h2>
+      <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
+        ${periods.map(p => `<button onclick="setChartFilter('${p}')" class="px-4 py-2 rounded-xl text-base font-medium whitespace-nowrap ${periodFilter===p?'bg-blue-600 text-white shadow-md':'bg-gray-100 text-gray-600'}">${p}</button>`).join('')}
+      </div>
+      <div class="flex gap-2 mb-5">
+        <button onclick="setChartMetric('bp')" class="flex-1 py-2.5 rounded-xl text-base font-medium ${chartMetric==='bp'?'bg-red-500 text-white shadow-md':'bg-gray-100 text-gray-600'}">🩺 血壓</button>
+        <button onclick="setChartMetric('hr')" class="flex-1 py-2.5 rounded-xl text-base font-medium ${chartMetric==='hr'?'bg-purple-500 text-white shadow-md':'bg-gray-100 text-gray-600'}">💓 心跳</button>
+      </div>
+      ${filtered.length > 0 ? `<div class="grid grid-cols-3 gap-3 mb-5">
+        <div class="bg-red-50 rounded-2xl p-4 text-center"><div class="text-2xl font-bold text-red-600">${avgSys}</div><div class="text-sm text-gray-500">平均上壓</div></div>
+        <div class="bg-blue-50 rounded-2xl p-4 text-center"><div class="text-2xl font-bold text-blue-600">${avgDia}</div><div class="text-sm text-gray-500">平均下壓</div></div>
+        <div class="bg-purple-50 rounded-2xl p-4 text-center"><div class="text-2xl font-bold text-purple-600">${avgHR}</div><div class="text-sm text-gray-500">平均心跳</div></div>
+      </div>` : ''}
+      ${sorted.length === 0 ? '<div class="text-center py-16 text-gray-400"><div class="text-5xl mb-4">📈</div><p class="text-xl">暫無數據</p></div>' :
+      `<div class="bg-white rounded-2xl shadow-md p-4"><canvas id="bpChart" height="300"></canvas></div>
+      <div class="mt-4 bg-blue-50 rounded-2xl p-4 text-sm text-blue-700">💡 提示：選擇不同時段可以比較同一時段的血壓變化趨勢。</div>`}
+    </div>`;
+  }
+
+  window.setChartFilter = function(p) { periodFilter = p; renderMain(); };
+  window.setChartMetric = function(m) { chartMetric = m; renderMain(); };
+
+  function initChart() {
+    const canvas = document.getElementById('bpChart');
+    if (!canvas) return;
+    if (chartInstance) chartInstance.destroy();
+    const filtered = periodFilter === '全部' ? records : records.filter(r => r.period === periodFilter);
+    const sorted = [...filtered].sort((a,b) => (`${a.date} ${a.time}`).localeCompare(`${b.date} ${b.time}`));
+    const labels = sorted.map(r => r.date.slice(5)+' '+r.time);
+
+    const datasets = chartMetric === 'bp' ? [
+      { label: '上壓', data: sorted.map(r => r.systolic), borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', borderWidth: 3, tension: 0.3, pointRadius: 5 },
+      { label: '下壓', data: sorted.map(r => r.diastolic), borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', borderWidth: 3, tension: 0.3, pointRadius: 5 },
+    ] : [
+      { label: '心跳', data: sorted.map(r => r.heartRate), borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', borderWidth: 3, tension: 0.3, pointRadius: 5 },
+    ];
+
+    chartInstance = new Chart(canvas, {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          y: { min: chartMetric === 'bp' ? 40 : 40, max: chartMetric === 'bp' ? 200 : 140 },
+          x: { ticks: { maxRotation: 45, font: { size: 10 } } }
+        }
+      }
+    });
+  }
+
+  // ===== Guide Tab =====
+  function renderGuideTab() {
+    return `<div class="max-w-2xl mx-auto p-4">
+      <h2 class="text-2xl font-bold text-gray-800 mb-5">📖 血壓參考指引</h2>
+      <div class="bg-white rounded-2xl shadow-md overflow-hidden mb-6">
+        <div class="bg-gradient-to-r from-blue-500 to-indigo-600 text-white p-4">
+          <h3 class="text-xl font-bold">血壓分類標準</h3>
+          <p class="text-blue-100 text-sm mt-1">根據美國心臟協會 (AHA) 指引</p>
+        </div>
+        <table class="w-full text-base">
+          <thead><tr class="bg-gray-50 border-b-2"><th class="px-4 py-3 text-left font-bold">分類</th><th class="px-4 py-3 text-center font-bold">上壓<br><span class="text-xs font-normal">(mmHg)</span></th><th class="px-4 py-3 text-center font-bold"></th><th class="px-4 py-3 text-center font-bold">下壓<br><span class="text-xs font-normal">(mmHg)</span></th></tr></thead>
+          <tbody>
+            <tr class="bg-blue-50 border-b"><td class="px-4 py-3 font-bold text-blue-700">⬇️ 偏低</td><td class="px-4 py-3 text-center font-semibold">&lt; 90</td><td class="px-4 py-3 text-center text-gray-400">或</td><td class="px-4 py-3 text-center font-semibold">&lt; 60</td></tr>
+            <tr class="bg-green-50 border-b"><td class="px-4 py-3 font-bold text-green-700">✅ 正常</td><td class="px-4 py-3 text-center font-semibold">&lt; 120</td><td class="px-4 py-3 text-center text-gray-400">及</td><td class="px-4 py-3 text-center font-semibold">&lt; 80</td></tr>
+            <tr class="bg-yellow-50 border-b"><td class="px-4 py-3 font-bold text-yellow-700">⚠️ 偏高</td><td class="px-4 py-3 text-center font-semibold">120-129</td><td class="px-4 py-3 text-center text-gray-400">及</td><td class="px-4 py-3 text-center font-semibold">&lt; 80</td></tr>
+            <tr class="bg-orange-50 border-b"><td class="px-4 py-3 font-bold text-orange-700">🟠 高血壓一期</td><td class="px-4 py-3 text-center font-semibold">130-139</td><td class="px-4 py-3 text-center text-gray-400">或</td><td class="px-4 py-3 text-center font-semibold">80-89</td></tr>
+            <tr class="bg-red-50 border-b"><td class="px-4 py-3 font-bold text-red-600">🔴 高血壓二期</td><td class="px-4 py-3 text-center font-semibold">140-179</td><td class="px-4 py-3 text-center text-gray-400">或</td><td class="px-4 py-3 text-center font-semibold">90-119</td></tr>
+            <tr class="bg-red-100"><td class="px-4 py-3 font-bold text-red-800">🚨 危險高血壓</td><td class="px-4 py-3 text-center font-semibold">≥ 180</td><td class="px-4 py-3 text-center text-gray-400">或</td><td class="px-4 py-3 text-center font-semibold">≥ 120</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bg-white rounded-2xl shadow-md overflow-hidden mb-6">
+        <div class="bg-gradient-to-r from-purple-500 to-pink-600 text-white p-4">
+          <h3 class="text-xl font-bold">心跳參考範圍</h3>
+        </div>
+        <table class="w-full text-base">
+          <thead><tr class="bg-gray-50 border-b-2"><th class="px-4 py-3 text-left font-bold">分類</th><th class="px-4 py-3 text-center font-bold">心跳 (次/分鐘)</th></tr></thead>
+          <tbody>
+            <tr class="bg-blue-50 border-b"><td class="px-4 py-3 font-bold text-blue-600">⬇️ 偏慢</td><td class="px-4 py-3 text-center font-semibold">&lt; 60</td></tr>
+            <tr class="bg-green-50 border-b"><td class="px-4 py-3 font-bold text-green-600">✅ 正常</td><td class="px-4 py-3 text-center font-semibold">60 - 100</td></tr>
+            <tr class="bg-red-50"><td class="px-4 py-3 font-bold text-red-600">⬆️ 偏快</td><td class="px-4 py-3 text-center font-semibold">&gt; 100</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bg-white rounded-2xl shadow-md p-5 mb-6">
+        <h3 class="text-xl font-bold text-gray-800 mb-4">💡 量血壓小貼士</h3>
+        <div class="space-y-3 text-base text-gray-700">
+          <div class="flex gap-3 items-start"><span class="text-2xl">🪑</span><p>量血壓前，先<strong>坐下休息 5 分鐘</strong>，放鬆身心。</p></div>
+          <div class="flex gap-3 items-start"><span class="text-2xl">☕</span><p>測量前 <strong>30 分鐘內避免</strong>喝咖啡、茶或吸煙。</p></div>
+          <div class="flex gap-3 items-start"><span class="text-2xl">💪</span><p>手臂放在桌上，<strong>與心臟同高</strong>，袖帶綁在上臂。</p></div>
+          <div class="flex gap-3 items-start"><span class="text-2xl">🤫</span><p>測量時<strong>不要說話</strong>，保持安靜。</p></div>
+          <div class="flex gap-3 items-start"><span class="text-2xl">🔄</span><p>建議每次量 <strong>2-3 次</strong>，取平均值記錄。</p></div>
+          <div class="flex gap-3 items-start"><span class="text-2xl">⏰</span><p>建議<strong>每天固定時間</strong>測量。</p></div>
+        </div>
+      </div>
+      <div class="bg-amber-50 rounded-2xl p-4 text-sm text-amber-800 border border-amber-200">⚠️ <strong>免責聲明：</strong>本應用程式僅供參考，不能取代專業醫療建議。如有任何健康疑慮，請諮詢您的醫生。</div>
+    </div>`;
+  }
+
+  // ===== Init =====
+  render();
+})();
+</script>
+</body>
+</html>
